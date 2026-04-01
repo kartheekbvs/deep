@@ -7,15 +7,20 @@ env/
 venv/
 ENV/
 
-# Data and Models
+# Heavy training data (never commit ~500MB EMNIST)
 data/
+
+# Legacy / non-production model artifacts
 models/*.pkl
 models/*.tflite
-# models/digit_cnn.pth # We actually WANT to include this small model file
+models/*.h5
+# digit_cnn.pth and universal_cnn_best.pth ARE committed (small enough)
 
 # Artifacts & System
 .DS_Store
 *.log
 verify_api.py
 retrain.py
-train_cnn.py
+
+# Local notebook scratch
+scratch/

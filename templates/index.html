@@ -4,121 +4,207 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>DigitSense - ML Handwritten Classifier</title>
-    <!-- Google Fonts: Inter -->
+    <title>CharSense AI — Universal Handwriting Recognizer</title>
+    <meta name="description" content="Recognize handwritten digits (0-9), uppercase letters (A-Z), and lowercase letters (a-z) using deep learning CNN models.">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
 </head>
 
 <body>
     <div class="app-container">
+
+        <!-- ── Header ─────────────────────────────────────────────────── -->
         <header class="app-header">
-            <div class="logo">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                    <rect x="3" y="3" width="18" height="18" rx="4" stroke="currentColor" stroke-width="2.5" />
-                    <path d="M7 12H17" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-                    <path d="M12 7V17" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" />
-                </svg>
-                <h1>DigitSense AI</h1>
+            <div class="logo-row">
+                <div class="logo-icon">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 2c2.24 0 4.32.75 5.99 2H6.01C7.68 4.75 9.76 4 12 4zm0 16c-2.24 0-4.32-.75-5.99-2H17.99C16.32 18.25 14.24 19 12 19z" fill="currentColor" opacity="0.3"/>
+                        <path d="M8 10l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M12 6v8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </div>
+                <h1>CharSense AI</h1>
+                <div class="version-badge" id="version-badge">v1 Digit</div>
             </div>
-            <p class="subtitle">Experience the power of a **Deep Convolutional Neural Network (CNN)** for 99.7% accuracy.</p>
+            <p class="subtitle">Handwriting recognition powered by a deep CNN — draw any digit, letter, or entire number.</p>
+
+            <!-- ── Model Toggle ─────────────────────────────────────────── -->
+            <div class="model-toggle-wrapper">
+                <div class="model-toggle" id="model-toggle">
+                    <button class="toggle-btn active" id="btn-v1" data-mode="v1">
+                        <span class="toggle-dot"></span>
+                        <span class="toggle-label">
+                            <strong>v1 — Digit</strong>
+                            <small>MNIST · 10 classes · ~99.9% acc</small>
+                        </span>
+                    </button>
+                    <button class="toggle-btn" id="btn-v2" data-mode="v2">
+                        <span class="toggle-dot"></span>
+                        <span class="toggle-label">
+                            <strong>v2 — Universal</strong>
+                            <small>EMNIST · 62 classes · A–Z a–z 0–9</small>
+                        </span>
+                    </button>
+                </div>
+            </div>
         </header>
 
+        <!-- ── Number Builder Bar (v1 & v2) ────────────────────────────── -->
+        <div class="number-builder" id="number-builder">
+            <div class="nb-label">Number Builder</div>
+            <div class="nb-sequence" id="nb-sequence">
+                <span class="nb-placeholder">Draw a char, then press ⊕ Add</span>
+            </div>
+            <div class="nb-controls">
+                <button class="btn btn-add" id="nb-add-btn" title="Add current prediction to sequence">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                        <path d="M12 5v14M5 12h14"/>
+                    </svg>
+                    Add
+                </button>
+                <button class="btn btn-nb-clear" id="nb-clear-btn" title="Clear number sequence">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                        <path d="M18 6L6 18M6 6l12 12"/>
+                    </svg>
+                    Clear
+                </button>
+                <button class="btn btn-nb-copy" id="nb-copy-btn" title="Copy to clipboard">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                        <rect x="9" y="9" width="13" height="13" rx="2"/>
+                        <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                    </svg>
+                    Copy
+                </button>
+            </div>
+        </div>
+
+        <!-- ── Main Grid ────────────────────────────────────────────────── -->
         <main class="main-content">
-            <!-- Left Panel: Drawing Area -->
+
+            <!-- Left: Drawing Canvas -->
             <section class="panel input-panel">
                 <div class="panel-header">
-                    <h2>Input Canvas</h2>
-                    <span class="badge">MNIST 28x28 Scale</span>
+                    <h2>Draw Here</h2>
+                    <span class="badge" id="canvas-badge">28 × 28 MNIST Scale</span>
                 </div>
-                
-                <div class="canvas-container">
-                    <canvas id="drawingCanvas" width="280" height="280"></canvas>
+
+                <div class="canvas-wrapper">
+                    <div class="canvas-container">
+                        <canvas id="drawingCanvas" width="280" height="280"></canvas>
+                    </div>
+                    <!-- Brush size slider -->
+                    <div class="brush-row">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="4"/></svg>
+                        <input type="range" id="brush-slider" min="6" max="32" value="18" class="brush-slider" title="Brush size">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8"/></svg>
+                    </div>
                 </div>
 
                 <div class="controls">
                     <button id="clearBtn" class="btn btn-secondary">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2M10 11v6M14 11v6"/></svg>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
                         Clear
                     </button>
                     <button id="predictBtn" class="btn btn-primary">
-                        <span>Run Pipeline</span>
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+                        Recognize
                     </button>
+                </div>
+
+                <!-- Quick char-set guide (v2 only) -->
+                <div class="char-guide" id="char-guide" style="display:none">
+                    <p class="guide-title">Supported characters (62 total)</p>
+                    <div class="guide-chips">
+                        <span class="guide-group">Digits: 0 1 2 3 4 5 6 7 8 9</span>
+                        <span class="guide-group">Upper: A B C … Z</span>
+                        <span class="guide-group">Lower: a b c … z</span>
+                    </div>
                 </div>
             </section>
 
-            <!-- Right Panel: Pipeline & Result -->
+            <!-- Right: Pipeline + Result -->
             <section class="panel pipeline-panel">
                 <div class="panel-header">
-                    <h2>ML Inference Pipeline</h2>
+                    <h2>ML Pipeline</h2>
+                    <span class="badge" id="model-label-badge">CNN · v1</span>
                 </div>
 
-                <div class="pipeline-flow">
-                    <!-- CNN Stage -->
+                <!-- Pipeline Steps -->
+                <div class="pipeline-flow" id="pipeline-flow">
                     <div class="pipeline-step" id="step-cnn">
                         <div class="step-icon">
-                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><path d="M7 7h3v3H7zM14 7h3v3h-3zM7 14h3v3H7zM14 14h3v3h-3z"/></svg>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="7" height="7" rx="1"/>
+                                <rect x="14" y="3" width="7" height="7" rx="1"/>
+                                <rect x="3" y="14" width="7" height="7" rx="1"/>
+                                <rect x="14" y="14" width="7" height="7" rx="1"/>
+                            </svg>
                         </div>
                         <div class="step-details">
-                            <h3>Feature Extraction</h3>
-                            <p>Convolutional layers identifying edges, curves, and spatial patterns.</p>
-                            <div class="progress-bar-container">
-                                <div class="progress-bar"></div>
-                            </div>
+                            <h3>Conv Feature Extraction</h3>
+                            <p>3 blocks of Conv2D + BatchNorm + ReLU detect edges, loops, and curves.</p>
+                            <div class="progress-bar-container"><div class="progress-bar"></div></div>
                         </div>
                     </div>
-
                     <div class="connector"></div>
-
-                    <!-- Neural Network Architecture Stage -->
                     <div class="pipeline-step" id="step-pca">
                         <div class="step-icon">
-                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 3L3 21M21 21L3 3M12 2v20M2 12h20"/></svg>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="12" cy="12" r="3"/>
+                                <path d="M12 2v4M12 18v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M2 12h4M18 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
+                            </svg>
                         </div>
                         <div class="step-details">
-                            <h3>Deep Pooling & Norm</h3>
-                            <p>Max pooling and Batch Normalization to ensure invariant feature maps.</p>
-                            <div class="progress-bar-container">
-                                <div class="progress-bar"></div>
-                            </div>
+                            <h3 id="step2-title">MaxPool + Dropout</h3>
+                            <p id="step2-desc">Spatial downsampling and dropout prevent overfitting.</p>
+                            <div class="progress-bar-container"><div class="progress-bar"></div></div>
                         </div>
                     </div>
-
                     <div class="connector"></div>
-
-                    <!-- Softmax Stage -->
                     <div class="pipeline-step" id="step-lr">
                         <div class="step-icon">
-                            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M18 20V10M12 20V4M6 20v-6"/>
+                            </svg>
                         </div>
                         <div class="step-details">
-                            <h3>Softmax Classification</h3>
-                            <p>Final high-dimensional mapping into categorical probabilities.</p>
-                            <div class="progress-bar-container">
-                                <div class="progress-bar"></div>
-                            </div>
+                            <h3 id="step3-title">Softmax · 10 Classes</h3>
+                            <p id="step3-desc">Dense head maps features to digit probabilities.</p>
+                            <div class="progress-bar-container"><div class="progress-bar"></div></div>
                         </div>
                     </div>
                 </div>
 
+                <!-- Result Card -->
                 <div class="result-container" id="result-container">
-                    <div class="prediction-header">
-                        <h3>Prediction</h3>
-                        <div class="predicted-digit" id="predicted-digit">-</div>
+                    <div class="result-top">
+                        <div>
+                            <div class="result-meta" id="result-meta">Prediction</div>
+                            <div class="predicted-char" id="predicted-digit">?</div>
+                        </div>
+                        <div class="result-right">
+                            <div class="top-conf-ring" id="top-conf-ring">
+                                <svg viewBox="0 0 56 56">
+                                    <circle class="ring-bg" cx="28" cy="28" r="24" />
+                                    <circle class="ring-fill" id="ring-fill" cx="28" cy="28" r="24"
+                                        stroke-dasharray="150.8" stroke-dashoffset="150.8" />
+                                    <text class="ring-text" x="28" y="33" text-anchor="middle" id="ring-text">0%</text>
+                                </svg>
+                            </div>
+                            <div class="conf-label-small">Confidence</div>
+                        </div>
                     </div>
 
-                    <div class="confidence-list" id="confidence-list">
-                        <!-- Populated by JS -->
-                    </div>
+                    <div class="top5-header">Top predictions</div>
+                    <div class="confidence-list" id="confidence-list"></div>
                 </div>
             </section>
         </main>
 
         <footer class="app-footer">
-            <p>&copy; 2026 DigitSense. Handcrafted for performance and precision.</p>
+            <p>CharSense AI &mdash; v1 MNIST (10 classes) &amp; v2 EMNIST ByClass (62 classes). Built for precision.</p>
         </footer>
     </div>
 

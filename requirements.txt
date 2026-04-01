@@ -3,5 +3,6 @@ flask-cors
 numpy
 pillow
 torch
+torchvision
 joblib
 gunicorn
