@@ -10,6 +10,7 @@ from flask_cors import CORS
 try:
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
     import joblib
     import threading
     HAS_ML_DEPS = True
@@ -72,45 +73,58 @@ class DigitCNN(nn.Module if HAS_ML_DEPS else object):
         x = self.features(x)
         return self.classifier(x)
 
-# ── V2: 62-class CNN (must match train_universal.py exactly) ──────────────────
+# ── V2: 62-class CNN with residual connections ───────────────────────────────
+# Updated architecture: deeper model with skip connections, batch norm,
+# and global average pooling for better 62-class discrimination.
 class UniversalCNN(nn.Module if HAS_ML_DEPS else object):
     def __init__(self):
         super(UniversalCNN, self).__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
-            nn.BatchNorm2d(32),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Dropout2d(0.25),
-
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(64, 64, kernel_size=3, padding=1),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-            nn.Dropout2d(0.25),
-
-            nn.Conv2d(64, 128, kernel_size=3, padding=1),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(2),
-        )
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(128 * 3 * 3, 512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(512, 62)
-        )
+        # Block 1: 1 → 64 channels, 28x28 → 14x14
+        self.b1_conv1 = nn.Conv2d(1, 64, 3, padding=1, bias=False)
+        self.b1_bn1   = nn.BatchNorm2d(64)
+        self.b1_conv2 = nn.Conv2d(64, 64, 3, padding=1, bias=False)
+        self.b1_bn2   = nn.BatchNorm2d(64)
+        # Block 2: 64 → 128 channels, 14x14 → 7x7
+        self.b2_conv1 = nn.Conv2d(64, 128, 3, padding=1, bias=False)
+        self.b2_bn1   = nn.BatchNorm2d(128)
+        self.b2_conv2 = nn.Conv2d(128, 128, 3, padding=1, bias=False)
+        self.b2_bn2   = nn.BatchNorm2d(128)
+        # Block 3: 128 → 256 channels, 7x7 → 3x3
+        self.b3_conv1 = nn.Conv2d(128, 256, 3, padding=1, bias=False)
+        self.b3_bn1   = nn.BatchNorm2d(256)
+        self.b3_conv2 = nn.Conv2d(256, 256, 3, padding=1, bias=False)
+        self.b3_bn2   = nn.BatchNorm2d(256)
+        # Global Average Pooling + Classifier
+        self.gap    = nn.AdaptiveAvgPool2d(1)
+        self.fc1    = nn.Linear(256, 512)
+        self.fc1_bn = nn.BatchNorm1d(512)
+        self.fc2    = nn.Linear(512, 256)
+        self.fc3    = nn.Linear(256, 62)
 
     def forward(self, x):
-        x = self.features(x)
-        return self.classifier(x)
+        # Block 1 with residual
+        x = F.relu(self.b1_bn1(self.b1_conv1(x)), inplace=True)
+        identity = x
+        x = F.relu(self.b1_bn2(self.b1_conv2(x)) + identity, inplace=True)
+        x = F.max_pool2d(F.dropout2d(x, 0.1, self.training), 2)
+
+        # Block 2 with residual
+        x = F.relu(self.b2_bn1(self.b2_conv1(x)), inplace=True)
+        identity = x
+        x = F.relu(self.b2_bn2(self.b2_conv2(x)) + identity, inplace=True)
+        x = F.max_pool2d(F.dropout2d(x, 0.2, self.training), 2)
+
+        # Block 3 with residual
+        x = F.relu(self.b3_bn1(self.b3_conv1(x)), inplace=True)
+        identity = x
+        x = F.relu(self.b3_bn2(self.b3_conv2(x)) + identity, inplace=True)
+        x = F.max_pool2d(F.dropout2d(x, 0.25, self.training), 2)
+
+        # GAP + Classifier
+        x = self.gap(x).flatten(1)
+        x = F.dropout(F.relu(self.fc1_bn(self.fc1(x)), inplace=True), 0.5, self.training)
+        x = F.dropout(F.relu(self.fc2(x), inplace=True), 0.3, self.training)
+        return self.fc3(x)
 
 
 # ── Model Loader ──────────────────────────────────────────────────────────────
@@ -170,7 +184,11 @@ def load_all_models():
 
 # ── Image Preprocessor ────────────────────────────────────────────────────────
 def preprocess_image(base64_string, mode='v1'):
-    """Returns (1, 1, 28, 28) float32 tensor for PyTorch, normalised."""
+    """Returns (1, 1, 28, 28) float32 tensor for PyTorch, normalised.
+
+    V2 model was trained with inverted+corrected EMNIST images that match
+    the output of this preprocessing pipeline exactly.
+    """
     if ',' in base64_string:
         base64_string = base64_string.split(',')[1]
 
@@ -181,7 +199,8 @@ def preprocess_image(base64_string, mode='v1'):
     bg = Image.new('RGBA', img.size, (255, 255, 255))
     gray = Image.alpha_composite(bg, img).convert('L')
 
-    # Invert: white pen on black bg → black digit on white bg for the model
+    # Invert: black pen on white bg → white pen on black bg for the model
+    # This matches the EMNIST-inverted training data format
     gray = PIL.ImageOps.invert(gray)
 
     img28 = gray.resize((28, 28), resample=Image.Resampling.LANCZOS)
@@ -223,8 +242,8 @@ def predict():
         if mode == 'v2':
             if universal_model is None:
                 return jsonify({'error': 'Universal model (V2) not loaded yet. '
-                                         'Run python train_universal.py first.'}), 503
-            # EMNIST ByClass normalisation
+                                         'Run python train_universal_v2.py first.'}), 503
+            # EMNIST ByClass normalisation (model trained with corrected orientation)
             x = (arr - 0.1736) / 0.3317
             t = torch.from_numpy(x).float()
             with torch.no_grad():

@@ -9,6 +9,7 @@ ENV/
 
 # Heavy training data (never commit ~500MB EMNIST)
 data/
+data_letters/
 
 # Legacy / non-production model artifacts
 models/*.pkl
