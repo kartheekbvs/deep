@@ -25,3 +25,7 @@ retrain.py
 
 # Local notebook scratch
 scratch/
+models/test_small.pt
+models/train_subset.pt
+models/training_ckpt.pt
+run_training.sh

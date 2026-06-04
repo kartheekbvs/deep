@@ -1,246 +1,302 @@
 """
-train_universal.py — Trains a 62-class CNN on EMNIST ByClass dataset.
+train_universal.py — Train 62-class Universal CNN on preprocessed EMNIST data.
 
-KEY FIXES (v2) over the original:
-1. IMAGE ORIENTATION: Transposes EMNIST images to match how users draw on screen.
-   The original model was trained on transposed (column-major) EMNIST images,
-   causing ~8% accuracy on user-drawn input.
-2. IMAGE INVERSION: Inverts EMNIST images so stroke=bright, bg=dark, matching
-   the app.py preprocess_image pipeline which inverts canvas drawings.
-3. DEEPER ARCHITECTURE: Residual-style CNN with skip connections and GAP.
-   ~1.4M parameters for strong 62-class discrimination.
-4. LABEL SMOOTHING: Prevents overconfident predictions.
-5. COSINE ANNEALING: Better learning rate scheduling.
+Usage: First run data extraction, then: python train_universal.py
+The data files models/train_subset.pt and models/test_data.pt must exist.
 
-The trained model works with the EXISTING app.py preprocessing:
-  Canvas (black stroke on white bg) → invert → resize 28x28 → normalize
-
-Run: python train_universal.py
-Output: models/universal_cnn_best.pth
+Supports checkpoint resumption: if models/training_ckpt.pt exists, resumes from it.
 """
 
-import os
+import os, time, random, sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import torchvision
-import torchvision.transforms as transforms
-from torch.utils.data import DataLoader, Dataset
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.data import DataLoader, TensorDataset
+from torch.optim.lr_scheduler import OneCycleLR
 import numpy as np
 
 os.makedirs('models', exist_ok=True)
-
 NUM_CLASSES = 62
 EMNIST_MEAN = 0.1736
 EMNIST_STD  = 0.3317
 
 
-class EMNISTForApp(Dataset):
-    """Prepares EMNIST images to match exactly what app.py preprocess_image produces.
+class SEBlock(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super(SEBlock, self).__init__()
+        mid = max(channels // reduction, 8)
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, mid, bias=False), nn.ReLU(inplace=True),
+            nn.Linear(mid, channels, bias=False), nn.Sigmoid()
+        )
+    def forward(self, x):
+        b, c, _, _ = x.shape
+        y = self.pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
 
-    The app.py pipeline:
-      1. Canvas: user draws black stroke on white background
-      2. Invert: white stroke on black background
-      3. Resize to 28x28
-      4. Normalize: (pixel - 0.1736) / 0.3317
 
-    This dataset applies:
-      1. Transpose: correct EMNIST column-major orientation
-      2. Invert: 1.0 - pixel (dark stroke on white bg → bright stroke on dark bg)
-      3. Normalize: same as app.py
-    """
-    def __init__(self, base_dataset):
-        self.base = base_dataset
-
-    def __len__(self):
-        return len(self.base)
-
-    def __getitem__(self, idx):
-        img, label = self.base[idx]
-        img_np = img.numpy()
-        # Transpose spatial dims (EMNIST stores images in column-major order)
-        img_corrected = np.ascontiguousarray(img_np.transpose(0, 2, 1))
-        # Invert: EMNIST has dark stroke on white bg, app sends bright stroke on dark bg
-        img_inverted = 1.0 - img_corrected
-        # Normalize with EMNIST stats (same as app.py)
-        img_normalized = (img_inverted - EMNIST_MEAN) / EMNIST_STD
-        return torch.from_numpy(img_normalized.astype('float32')), label
+class ResBlock(nn.Module):
+    def __init__(self, in_ch, out_ch, stride=1, se_reduction=16, drop_rate=0.0):
+        super(ResBlock, self).__init__()
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.se = SEBlock(out_ch, reduction=se_reduction)
+        self.drop = nn.Dropout2d(drop_rate)
+        self.shortcut = nn.Sequential()
+        if stride != 1 or in_ch != out_ch:
+            self.shortcut = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_ch)
+            )
+    def forward(self, x):
+        identity = self.shortcut(x)
+        out = F.relu(self.bn1(self.conv1(x)), inplace=True)
+        out = self.drop(out)
+        out = self.bn2(self.conv2(out))
+        out = self.se(out)
+        out += identity
+        out = F.relu(out, inplace=True)
+        return out
 
 
 class UniversalCNN(nn.Module):
-    """Deeper CNN with residual connections for 62-class EMNIST ByClass.
-
-    Architecture:
-      - 3 convolutional stages with residual (skip) connections
-      - Global average pooling
-      - Larger classifier with batch normalization
-      - ~1.4M parameters
-
-    Must match the class in app.py exactly.
-    """
+    """Must match the class in app.py exactly."""
     def __init__(self):
         super(UniversalCNN, self).__init__()
-        # Block 1: 1 → 64 channels, 28→14
-        self.b1_conv1 = nn.Conv2d(1, 64, 3, padding=1, bias=False)
-        self.b1_bn1   = nn.BatchNorm2d(64)
-        self.b1_conv2 = nn.Conv2d(64, 64, 3, padding=1, bias=False)
-        self.b1_bn2   = nn.BatchNorm2d(64)
-        # Block 2: 64 → 128 channels, 14→7
-        self.b2_conv1 = nn.Conv2d(64, 128, 3, padding=1, bias=False)
-        self.b2_bn1   = nn.BatchNorm2d(128)
-        self.b2_conv2 = nn.Conv2d(128, 128, 3, padding=1, bias=False)
-        self.b2_bn2   = nn.BatchNorm2d(128)
-        # Block 3: 128 → 256 channels, 7→3
-        self.b3_conv1 = nn.Conv2d(128, 256, 3, padding=1, bias=False)
-        self.b3_bn1   = nn.BatchNorm2d(256)
-        self.b3_conv2 = nn.Conv2d(256, 256, 3, padding=1, bias=False)
-        self.b3_bn2   = nn.BatchNorm2d(256)
-        # GAP + Classifier
-        self.gap    = nn.AdaptiveAvgPool2d(1)
-        self.fc1    = nn.Linear(256, 512)
-        self.fc1_bn = nn.BatchNorm1d(512)
-        self.fc2    = nn.Linear(512, 256)
-        self.fc3    = nn.Linear(256, NUM_CLASSES)
+        self.stem = nn.Sequential(
+            nn.Conv2d(1, 32, 3, padding=1, bias=False),
+            nn.BatchNorm2d(32), nn.ReLU(inplace=True),
+        )
+        self.stage1 = self._make_stage(32, 64,  num_blocks=2, stride=2, drop_rate=0.05)
+        self.stage2 = self._make_stage(64, 128, num_blocks=2, stride=2, drop_rate=0.10)
+        self.stage3 = self._make_stage(128, 256, num_blocks=2, stride=2, drop_rate=0.15)
+        self.gap = nn.AdaptiveAvgPool2d(1)
+        self.fc1 = nn.Linear(256, 128)
+        self.fc1_bn = nn.BatchNorm1d(128)
+        self.fc2 = nn.Linear(128, NUM_CLASSES)
+
+    def _make_stage(self, in_ch, out_ch, num_blocks, stride, drop_rate):
+        layers = [ResBlock(in_ch, out_ch, stride=stride, se_reduction=16, drop_rate=drop_rate)]
+        for _ in range(1, num_blocks):
+            layers.append(ResBlock(out_ch, out_ch, stride=1, se_reduction=16, drop_rate=drop_rate))
+        return nn.Sequential(*layers)
 
     def forward(self, x):
-        x = F.relu(self.b1_bn1(self.b1_conv1(x)), inplace=True)
-        identity = x
-        x = F.relu(self.b1_bn2(self.b1_conv2(x)) + identity, inplace=True)
-        x = F.max_pool2d(F.dropout2d(x, 0.1, self.training), 2)
-
-        x = F.relu(self.b2_bn1(self.b2_conv1(x)), inplace=True)
-        identity = x
-        x = F.relu(self.b2_bn2(self.b2_conv2(x)) + identity, inplace=True)
-        x = F.max_pool2d(F.dropout2d(x, 0.2, self.training), 2)
-
-        x = F.relu(self.b3_bn1(self.b3_conv1(x)), inplace=True)
-        identity = x
-        x = F.relu(self.b3_bn2(self.b3_conv2(x)) + identity, inplace=True)
-        x = F.max_pool2d(F.dropout2d(x, 0.25, self.training), 2)
-
+        x = self.stem(x)
+        x = self.stage1(x)
+        x = self.stage2(x)
+        x = self.stage3(x)
         x = self.gap(x).flatten(1)
-        x = F.dropout(F.relu(self.fc1_bn(self.fc1(x)), inplace=True), 0.5, self.training)
-        x = F.dropout(F.relu(self.fc2(x), inplace=True), 0.3, self.training)
-        return self.fc3(x)
+        x = F.dropout(F.relu(self.fc1_bn(self.fc1(x)), inplace=True), 0.4, self.training)
+        return self.fc2(x)
+
+
+def mixup_data(x, y, alpha=0.2):
+    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
+    idx = torch.randperm(x.size(0), device=x.device)
+    return lam * x + (1 - lam) * x[idx], y, y[idx], lam
+
+
+def mixup_criterion(crit, pred, y_a, y_b, lam):
+    return lam * crit(pred, y_a) + (1 - lam) * crit(pred, y_b)
+
+
+def pflush(msg):
+    """Print and flush immediately."""
+    print(msg, flush=True)
 
 
 def train():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Training on: {device}")
-    print(f"Training {NUM_CLASSES}-class Universal CNN (EMNIST ByClass)")
-    print("With corrected orientation AND inversion to match app.py preprocessing")
-    print("=" * 60)
+    torch.set_num_threads(2)
+    pflush(f"Device: {device} | Threads: {torch.get_num_threads()}")
+    pflush(f"Training {NUM_CLASSES}-class Universal CNN (ResNet + SE Attention)")
+    pflush("=" * 60)
 
-    # ── Transforms (augmentation only; normalization done in EMNISTForApp) ───
-    transform_train = transforms.Compose([
-        transforms.RandomRotation(10),
-        transforms.RandomAffine(
-            degrees=0, translate=(0.05, 0.05), scale=(0.9, 1.1), shear=5
-        ),
-        transforms.ToTensor(),
-    ])
-    transform_test = transforms.Compose([
-        transforms.ToTensor(),
-    ])
+    # Load preprocessed data
+    pflush("\nLoading preprocessed training data...")
+    d = torch.load('models/train_subset.pt', map_location='cpu')
+    X_train, y_train = d['images'], d['labels']
+    pflush(f"  Train: {X_train.shape}")
 
-    # ── Dataset ─────────────────────────────────────────────────────────────
-    print("\nLoading EMNIST ByClass dataset...")
-    raw_train = torchvision.datasets.EMNIST(
-        root='./data', split='byclass', train=True, download=True,
-        transform=transform_train
-    )
-    train_set = EMNISTForApp(raw_train)
+    pflush("Loading preprocessed test data...")
+    d = torch.load('models/test_small.pt', map_location='cpu')
+    X_test, y_test = d['images'], d['labels']
+    pflush(f"  Test: {X_test.shape}")
 
-    raw_test = torchvision.datasets.EMNIST(
-        root='./data', split='byclass', train=False, download=True,
-        transform=transform_test
-    )
-    test_set = EMNISTForApp(raw_test)
+    train_loader = DataLoader(TensorDataset(X_train, y_train), batch_size=64, shuffle=True, num_workers=0)
+    test_loader = DataLoader(TensorDataset(X_test, y_test), batch_size=128, shuffle=False, num_workers=0)
 
-    print(f"Train samples: {len(train_set):,}  |  Test samples: {len(test_set):,}")
+    # Free raw tensors (DataLoader holds copies)
+    del X_train, y_train, X_test, y_test, d
+    import gc; gc.collect()
 
-    train_loader = DataLoader(train_set, batch_size=128, shuffle=True, num_workers=2)
-    test_loader  = DataLoader(test_set, batch_size=256, shuffle=False, num_workers=2)
+    model = UniversalCNN().to(device)
+    pflush(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
 
-    # ── Model ───────────────────────────────────────────────────────────────
-    model     = UniversalCNN().to(device)
-    params    = sum(p.numel() for p in model.parameters())
-    print(f"Model parameters: {params:,}")
-
-    # ── Loss, Optimizer, Scheduler ──────────────────────────────────────────
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
-    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=5e-4)
-    scheduler = CosineAnnealingLR(optimizer, T_max=25, eta_min=1e-5)
+    optimizer = optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-3)
+    epochs = 40
+    start_epoch = 0
 
-    best_acc  = 0.0
-    epochs    = 25
+    # Check for checkpoint to resume from
+    ckpt_path = 'models/training_ckpt.pt'
+    if os.path.exists(ckpt_path):
+        pflush(f"\nResuming from checkpoint: {ckpt_path}")
+        ckpt = torch.load(ckpt_path, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'])
+        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        start_epoch = ckpt.get('epoch', 0)
+        best_acc = ckpt.get('best_acc', 0.0)
+        wait = ckpt.get('wait', 0)
+        pflush(f"  Resumed at epoch {start_epoch}, best_acc={best_acc:.2f}%, wait={wait}")
+    else:
+        best_acc = 0.0
+        wait = 0
 
-    for epoch in range(epochs):
-        # ── Training ────────────────────────────────────────────────────────
+    scheduler = OneCycleLR(optimizer, max_lr=3e-3, steps_per_epoch=len(train_loader),
+                           epochs=epochs, pct_start=0.1, anneal_strategy='cos',
+                           div_factor=25.0, final_div_factor=1000.0)
+
+    # If resuming, step scheduler to the right position
+    if start_epoch > 0:
+        total_steps_so_far = start_epoch * len(train_loader)
+        for _ in range(total_steps_so_far):
+            scheduler.step()
+        pflush(f"  Scheduler stepped {total_steps_so_far} times to resume position")
+
+    patience = 12
+    label_map = ([str(i) for i in range(10)] +
+                 [chr(c) for c in range(ord('A'), ord('Z')+1)] +
+                 [chr(c) for c in range(ord('a'), ord('z')+1)])
+
+    pflush(f"\nTraining {epochs} epochs (patience={patience}), {len(train_loader)} steps/epoch")
+    pflush(f"Starting from epoch {start_epoch + 1}")
+    pflush("=" * 60)
+
+    for epoch in range(start_epoch, epochs):
+        t0 = time.time()
         model.train()
-        running_loss = 0.0
-        correct = total = 0
+        running_loss = correct = total = 0
+
         for i, (images, labels) in enumerate(train_loader):
             images, labels = images.to(device), labels.to(device)
-
             optimizer.zero_grad()
-            outputs = model(images)
-            loss    = criterion(outputs, labels)
+
+            if epoch < 25:
+                mx, ya, yb, lam = mixup_data(images, labels, alpha=0.2)
+                outputs = model(mx)
+                loss = mixup_criterion(criterion, outputs, ya, yb, lam)
+            else:
+                outputs = model(images)
+                loss = criterion(outputs, labels)
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
 
             running_loss += loss.item()
             _, predicted = torch.max(outputs, 1)
-            total   += labels.size(0)
+            total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
-            if (i + 1) % 500 == 0:
-                print(f"  Epoch [{epoch+1}/{epochs}]  Step [{i+1}/{len(train_loader)}]  "
-                      f"Loss: {running_loss/(i+1):.4f}  Acc: {100*correct/total:.1f}%")
+            if (i+1) % 100 == 0:
+                pflush(f"  Epoch [{epoch+1}/{epochs}] Step [{i+1}/{len(train_loader)}] "
+                      f"Loss: {running_loss/(i+1):.4f} Acc: {100*correct/total:.1f}%")
 
         train_acc = 100.0 * correct / total
-        scheduler.step()
+        elapsed = time.time() - t0
 
-        # ── Validation ──────────────────────────────────────────────────────
+        # Validation
         model.eval()
         correct = total = 0
-        class_correct = [0] * NUM_CLASSES
-        class_total   = [0] * NUM_CLASSES
+        class_correct = [0]*NUM_CLASSES; class_total = [0]*NUM_CLASSES
 
         with torch.no_grad():
             for images, labels in test_loader:
                 images, labels = images.to(device), labels.to(device)
                 _, predicted = torch.max(model(images), 1)
-                total   += labels.size(0)
+                total += labels.size(0)
                 correct += (predicted == labels).sum().item()
-
                 for j in range(labels.size(0)):
                     lbl = labels[j].item()
-                    class_total[lbl] += 1
-                    if predicted[j] == lbl:
-                        class_correct[lbl] += 1
+                    if lbl < NUM_CLASSES:
+                        class_total[lbl] += 1
+                        if predicted[j] == lbl: class_correct[lbl] += 1
 
         acc = 100.0 * correct / total
-        digit_acc = 100.0 * sum(class_correct[:10]) / max(sum(class_total[:10]), 1)
-        upper_acc = 100.0 * sum(class_correct[10:36]) / max(sum(class_total[10:36]), 1)
-        lower_acc = 100.0 * sum(class_correct[36:]) / max(sum(class_total[36:]), 1)
+        da = 100.0*sum(class_correct[:10])/max(sum(class_total[:10]),1)
+        ua = 100.0*sum(class_correct[10:36])/max(sum(class_total[10:36]),1)
+        la = 100.0*sum(class_correct[36:])/max(sum(class_total[36:]),1)
 
-        print(f"\n>>> Epoch {epoch+1}/{epochs}  Train: {train_acc:.1f}%  Test: {acc:.2f}%  "
-              f"Digits: {digit_acc:.1f}%  Upper: {upper_acc:.1f}%  Lower: {lower_acc:.1f}%")
+        pflush(f"\n>>> Epoch {epoch+1}/{epochs} ({elapsed:.0f}s) "
+              f"Train: {train_acc:.1f}% Test: {acc:.2f}% "
+              f"Digits: {da:.1f}% Upper: {ua:.1f}% Lower: {la:.1f}%")
 
-        # ── Save checkpoints ────────────────────────────────────────────────
         torch.save(model.state_dict(), 'models/universal_cnn.pth')
         if acc > best_acc:
             best_acc = acc
             torch.save(model.state_dict(), 'models/universal_cnn_best.pth')
-            print(f"  ★ New best model saved ({acc:.2f}%)")
+            pflush(f"  ** New best: {acc:.2f}% **")
+            wait = 0
+        else:
+            wait += 1
+            pflush(f"  No improvement {wait}/{patience} (best: {best_acc:.2f}%)")
 
-    print(f"\nTraining complete! Best accuracy: {best_acc:.2f}%")
-    print("Saved: models/universal_cnn.pth  &  models/universal_cnn_best.pth")
-    print("Model is compatible with the existing app.py preprocessing pipeline.")
+        # Save checkpoint after every epoch for resumption
+        torch.save({
+            'epoch': epoch + 1,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_acc': best_acc,
+            'wait': wait,
+        }, ckpt_path)
+        pflush(f"  Checkpoint saved: epoch {epoch+1}")
+
+        if wait >= patience:
+            pflush(f"\nEarly stopping epoch {epoch+1}. Best: {best_acc:.2f}%")
+            break
+
+    # Final evaluation
+    pflush(f"\n{'='*60}\nTraining complete! Best: {best_acc:.2f}%")
+    model.load_state_dict(torch.load('models/universal_cnn_best.pth', map_location=device))
+    model.eval()
+
+    correct = total = 0
+    class_correct = [0]*NUM_CLASSES; class_total = [0]*NUM_CLASSES
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images, labels = images.to(device), labels.to(device)
+            _, predicted = torch.max(model(images), 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+            for j in range(labels.size(0)):
+                lbl = labels[j].item()
+                if lbl < NUM_CLASSES:
+                    class_total[lbl] += 1
+                    if predicted[j] == lbl: class_correct[lbl] += 1
+
+    pflush(f"\nFinal Test Accuracy: {100.0*correct/total:.2f}%")
+    for group_name, start, end in [("Digits",0,10),("Uppercase",10,36),("Lowercase",36,62)]:
+        pflush(f"\n--- {group_name} ---")
+        for i in range(start, end):
+            pct = 100.0*class_correct[i]/max(class_total[i],1)
+            pflush(f"  {label_map[i]}: {pct:.1f}%")
+
+    da = 100.0*sum(class_correct[:10])/max(sum(class_total[:10]),1)
+    ua = 100.0*sum(class_correct[10:36])/max(sum(class_total[10:36]),1)
+    la = 100.0*sum(class_correct[36:])/max(sum(class_total[36:]),1)
+    pflush(f"\nCategory Averages:\n  Digits: {da:.1f}%\n  Upper: {ua:.1f}%\n  Lower: {la:.1f}%\n  Overall: {100.0*correct/total:.2f}%")
+
+    # Clean up data files only after training is fully complete
+    for f in ['models/train_subset.pt', 'models/test_small.pt', ckpt_path]:
+        if os.path.exists(f): os.remove(f); pflush(f"Cleaned: {f}")
 
 
 if __name__ == "__main__":
