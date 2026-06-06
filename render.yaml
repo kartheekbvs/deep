@@ -3,9 +3,13 @@ services:
     name: charsense-ai
     env: python
     region: oregon
-    plan: free
-    buildCommand: "pip install -r requirements.txt"
+    plan: starter
+    buildCommand: "pip install -r requirements.txt && bash build.sh"
     startCommand: "gunicorn app:app --workers=1 --threads=4 --timeout=120"
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: SKIP_TRAINING
+        value: 0
+      - key: TORCH_THREADS
+        value: 4

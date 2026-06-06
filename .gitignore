@@ -26,6 +26,14 @@ retrain.py
 # Local notebook scratch
 scratch/
 models/test_small.pt
+models/test_small_v3.pt
 models/train_subset.pt
+models/train_balanced_v3.pt
+models/train_150k_v3.pt
+models/train_50k_v3.pt
 models/training_ckpt.pt
+models/training_v3_ckpt.pt
+models/v3_ckpt.pt
+models/universal_cnn_v3.pth
 run_training.sh
+emnist_data/
