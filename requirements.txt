@@ -5,3 +5,4 @@ pillow
 torch
 torchvision
 gunicorn
+scikit-learn

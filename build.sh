@@ -1,5 +1,5 @@
 #!/bin/bash
-# Render Build Script — Trains CharSenseNet-V3 during deployment
+# Render Build Script — Trains CharSenseNet-V4 during deployment
 #
 # This script runs during the Render build phase to:
 # 1. Train the model if no pre-trained weights exist
@@ -13,7 +13,10 @@
 
 set -e
 
-echo "=== CharSense Build Script ==="
+echo "=== CharSense-V4 Build Script ==="
+
+# Install sklearn dependency for stratified split
+pip install scikit-learn 2>/dev/null || true
 
 # Skip training if environment variable is set
 if [ "${SKIP_TRAINING:-0}" = "1" ]; then
@@ -33,7 +36,7 @@ if [ -f "models/universal_cnn_best.pth" ]; then
     exit 0
 fi
 
-echo "Training CharSenseNet-V3 model..."
-python3 train_v3_final.py
+echo "Training CharSenseNet-V4 model with RL-enhanced training..."
+python3 train_v4_rl.py
 
 echo "Build script complete!"
