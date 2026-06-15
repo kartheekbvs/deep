@@ -122,90 +122,50 @@ class CBAM(nn.Module if HAS_ML_DEPS else object):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# V4: CharSenseNet-V4 — DenseNet-SE-CBAM with RL-Enhanced Training
+# V4: CharSenseNet-V4 — Deeper ResNet with SE+CBAM Attention + RL Training
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class BottleneckResBlock(nn.Module if HAS_ML_DEPS else object):
-    """Bottleneck residual block with pre-activation and SE/CBAM attention."""
-    def __init__(self, in_ch, mid_ch, out_ch, stride=1, attention='se', drop_rate=0.0):
-        super(BottleneckResBlock, self).__init__()
-        self.bn1 = nn.BatchNorm2d(in_ch)
-        self.conv1 = nn.Conv2d(in_ch, mid_ch, 1, bias=False)
-        self.bn2 = nn.BatchNorm2d(mid_ch)
-        self.conv2 = nn.Conv2d(mid_ch, mid_ch, 3, stride=stride, padding=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(mid_ch)
-        self.conv3 = nn.Conv2d(mid_ch, out_ch, 1, bias=False)
-
-        if attention == 'cbam':
-            self.attn = CBAM(out_ch)
-        else:
-            self.attn = SEBlock(out_ch)
-
-        self.drop = nn.Dropout2d(drop_rate)
-        self.shortcut = nn.Sequential()
-        if stride != 1 or in_ch != out_ch:
-            self.shortcut = nn.Sequential(
-                nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_ch)
-            )
-
-    def forward(self, x):
-        identity = self.shortcut(x)
-        out = self.conv1(F.relu(self.bn1(x), inplace=True))
-        out = self.drop(out)
-        out = self.conv2(F.relu(self.bn2(out), inplace=True))
-        out = self.drop(out)
-        out = self.conv3(F.relu(self.bn3(out), inplace=True))
-        out = self.attn(out)
-        out += identity
-        return F.relu(out, inplace=True)
-
-
 class CharSenseNetV4(nn.Module if HAS_ML_DEPS else object):
-    """CharSenseNet-V4: Deep Bottleneck ResNet with SE+CBAM Attention.
+    """CharSenseNet-V4: Deeper ResNet with SE+CBAM Attention + RL Training.
 
-    Architecture (~5.5M parameters):
-      - Stem: 1 -> 64 channels
-      - Stage 1: 64 -> 256  (4 Bottleneck blocks, SE, 14x14)
-      - Stage 2: 256 -> 512 (4 Bottleneck blocks, SE, 7x7)
-      - Stage 3: 512 -> 1024 (4 Bottleneck blocks, CBAM, 3x3)
-      - GAP -> FC(1024, 512) -> FC(512, 62)
+    Architecture (~5.9M parameters):
+      - Stem: 1 -> 32 channels
+      - Stage 1: 32 -> 64  (4 ResBlocks + SE attention, 14x14)
+      - Stage 2: 64 -> 128 (4 ResBlocks + SE attention, 7x7)
+      - Stage 3: 128 -> 256 (4 ResBlocks + CBAM attention, 3x3)
+      - GAP -> FC(256, 128) -> FC(128, 62)
 
-    Trained with:
+    Key improvements over V3:
+      - 4 residual blocks per stage (vs 3 in V3)
       - RL hard sample mining (policy-gradient)
-      - Confidence regularizer (entropy reward)
-      - Mixup + CutMix + Cutout augmentation
-      - SWA (Stochastic Weight Averaging)
-      - Label smoothing + OneCycleLR
+      - Confidence regularization (entropy reward)
+      - Mixup augmentation + label smoothing + OneCycleLR
     """
     def __init__(self, num_classes=62):
         super(CharSenseNetV4, self).__init__()
-
         self.stem = nn.Sequential(
-            nn.Conv2d(1, 64, 3, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(1, 32, 3, padding=1, bias=False),
+            nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
         )
-
-        self.stage1 = self._make_stage(64, 64, 256, num_blocks=4, stride=2,
+        self.stage1 = self._make_stage(32, 64, num_blocks=4, stride=2,
                                         attention='se', drop_rate=0.02)
-        self.stage2 = self._make_stage(256, 128, 512, num_blocks=4, stride=2,
-                                        attention='se', drop_rate=0.04)
-        self.stage3 = self._make_stage(512, 256, 1024, num_blocks=4, stride=2,
-                                        attention='cbam', drop_rate=0.06)
+        self.stage2 = self._make_stage(64, 128, num_blocks=4, stride=2,
+                                        attention='se', drop_rate=0.05)
+        self.stage3 = self._make_stage(128, 256, num_blocks=4, stride=2,
+                                        attention='cbam', drop_rate=0.10)
+        self.gap    = nn.AdaptiveAvgPool2d(1)
+        self.fc1    = nn.Linear(256, 128)
+        self.fc1_bn = nn.BatchNorm1d(128)
+        self.fc2    = nn.Linear(128, num_classes)
 
-        self.gap = nn.AdaptiveAvgPool2d(1)
-        self.fc1 = nn.Linear(1024, 512)
-        self.fc1_bn = nn.BatchNorm1d(512)
-        self.fc2 = nn.Linear(512, num_classes)
-
-    def _make_stage(self, in_ch, mid_ch, out_ch, num_blocks, stride, attention, drop_rate):
+    def _make_stage(self, in_ch, out_ch, num_blocks, stride, attention, drop_rate):
         layers = []
-        layers.append(BottleneckResBlock(in_ch, mid_ch, out_ch, stride=stride,
-                                          attention=attention, drop_rate=drop_rate))
+        layers.append(ResBlockV3(in_ch, out_ch, stride=stride,
+                                  attention=attention, drop_rate=drop_rate))
         for _ in range(1, num_blocks):
-            layers.append(BottleneckResBlock(out_ch, mid_ch, out_ch, stride=1,
-                                              attention=attention, drop_rate=drop_rate))
+            layers.append(ResBlockV3(out_ch, out_ch, stride=1,
+                                      attention=attention, drop_rate=drop_rate))
         return nn.Sequential(*layers)
 
     def forward(self, x):
@@ -408,7 +368,7 @@ def load_all_models():
                         torch.load(pth_universal, map_location='cpu', weights_only=True))
                     universal_model.eval()
                     params = sum(p.numel() for p in universal_model.parameters())
-                    print(f"  V4 CharSenseNet-V4 loaded (62 classes, {params:,} params, DenseNet+SE+CBAM+RL)")
+                    print(f"  V4 CharSenseNet-V4 loaded (62 classes, {params:,} params, ResNet+SE+CBAM+RL)")
                 except Exception as e_v4:
                     print(f"  V4 load failed ({e_v4}), trying V3...")
                     # Try V3
@@ -475,7 +435,7 @@ def health():
     model_type = 'unknown'
     if universal_model is not None:
         if isinstance(universal_model, CharSenseNetV4):
-            model_type = 'v4-densenet-cbam-rl'
+            model_type = 'v4-resnet-cbam-rl'
         elif isinstance(universal_model, CharSenseNetV3):
             model_type = 'v3-cbam'
         else:
@@ -527,7 +487,7 @@ def predict():
 
             # Determine model version
             if isinstance(universal_model, CharSenseNetV4):
-                model_ver = 'v4-densenet-cbam-rl'
+                model_ver = 'v4-resnet-cbam-rl'
             elif isinstance(universal_model, CharSenseNetV3):
                 model_ver = 'v3-cbam'
             else:

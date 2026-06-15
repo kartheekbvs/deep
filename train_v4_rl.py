@@ -63,15 +63,13 @@ class CBAM(nn.Module):
         sp_att = torch.sigmoid(self.spatial_conv(torch.cat([avg_s, max_s], dim=1)))
         return x * sp_att
 
-class BottleneckResBlock(nn.Module):
-    def __init__(self, in_ch, mid_ch, out_ch, stride=1, attention='se', drop_rate=0.0):
+class ResBlockV3(nn.Module):
+    def __init__(self, in_ch, out_ch, stride=1, attention='se', drop_rate=0.0):
         super().__init__()
         self.bn1 = nn.BatchNorm2d(in_ch)
-        self.conv1 = nn.Conv2d(in_ch, mid_ch, 1, bias=False)
-        self.bn2 = nn.BatchNorm2d(mid_ch)
-        self.conv2 = nn.Conv2d(mid_ch, mid_ch, 3, stride=stride, padding=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(mid_ch)
-        self.conv3 = nn.Conv2d(mid_ch, out_ch, 1, bias=False)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, stride=stride, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_ch)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
         self.attn = CBAM(out_ch) if attention == 'cbam' else SEBlock(out_ch)
         self.drop = nn.Dropout2d(drop_rate)
         self.shortcut = nn.Sequential()
@@ -80,37 +78,45 @@ class BottleneckResBlock(nn.Module):
                 nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
                 nn.BatchNorm2d(out_ch)
             )
+
     def forward(self, x):
         identity = self.shortcut(x)
         out = self.conv1(F.relu(self.bn1(x), inplace=True))
         out = self.drop(out)
         out = self.conv2(F.relu(self.bn2(out), inplace=True))
-        out = self.drop(out)
-        out = self.conv3(F.relu(self.bn3(out), inplace=True))
         out = self.attn(out)
         out += identity
         return F.relu(out, inplace=True)
 
 class CharSenseNetV4(nn.Module):
+    """CharSenseNet-V4: Deeper ResNet with SE+CBAM + RL Training (~5.9M params)."""
     def __init__(self, num_classes=62):
         super().__init__()
         self.stem = nn.Sequential(
-            nn.Conv2d(1, 64, 3, padding=1, bias=False),
-            nn.BatchNorm2d(64),
+            nn.Conv2d(1, 32, 3, padding=1, bias=False),
+            nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
         )
-        self.stage1 = self._make_stage(64, 64, 256, 4, 2, 'se', 0.02)
-        self.stage2 = self._make_stage(256, 128, 512, 4, 2, 'se', 0.04)
-        self.stage3 = self._make_stage(512, 256, 1024, 4, 2, 'cbam', 0.06)
+        self.stage1 = self._make_stage(32, 64, num_blocks=4, stride=2,
+                                        attention='se', drop_rate=0.02)
+        self.stage2 = self._make_stage(64, 128, num_blocks=4, stride=2,
+                                        attention='se', drop_rate=0.05)
+        self.stage3 = self._make_stage(128, 256, num_blocks=4, stride=2,
+                                        attention='cbam', drop_rate=0.10)
         self.gap = nn.AdaptiveAvgPool2d(1)
-        self.fc1 = nn.Linear(1024, 512)
-        self.fc1_bn = nn.BatchNorm1d(512)
-        self.fc2 = nn.Linear(512, num_classes)
-    def _make_stage(self, in_ch, mid_ch, out_ch, num_blocks, stride, attention, drop_rate):
-        layers = [BottleneckResBlock(in_ch, mid_ch, out_ch, stride=stride, attention=attention, drop_rate=drop_rate)]
+        self.fc1 = nn.Linear(256, 128)
+        self.fc1_bn = nn.BatchNorm1d(128)
+        self.fc2 = nn.Linear(128, num_classes)
+
+    def _make_stage(self, in_ch, out_ch, num_blocks, stride, attention, drop_rate):
+        layers = []
+        layers.append(ResBlockV3(in_ch, out_ch, stride=stride,
+                                  attention=attention, drop_rate=drop_rate))
         for _ in range(1, num_blocks):
-            layers.append(BottleneckResBlock(out_ch, mid_ch, out_ch, stride=1, attention=attention, drop_rate=drop_rate))
+            layers.append(ResBlockV3(out_ch, out_ch, stride=1,
+                                      attention=attention, drop_rate=drop_rate))
         return nn.Sequential(*layers)
+
     def forward(self, x):
         x = self.stem(x)
         x = self.stage1(x)
