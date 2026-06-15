@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
 """
-CharSenseNet-V4 Training — Optimized for CPU with RL-Enhanced Training
+CharSenseNet-V4 Training — RL-Enhanced with EMNIST ByClass Data
 
-Uses the proven V3 ResNet+SE+CBAM architecture scaled up for more power,
-with RL hard sample mining and confidence regularization.
-Trains on balanced EMNIST ByClass subset (3000/class = 186K samples).
+Architecture: Deep ResNet with SE+CBAM attention (~5.9M params)
+Training: 3-phase RL training (Mixup → RL Hard Sample Mining → Fine-tuning)
+Data: Balanced subset of EMNIST ByClass (configurable per-class count)
+
+This script can be run in two modes:
+  1. Local quick training: python train_v4_rl.py
+  2. Full training on Render: automatic during build (see build.sh)
+
+For Render: The full dataset is downloaded and trained with all epochs.
+For local: A balanced subset is used for faster iteration.
 """
 
 import os, random, time, gc, sys
@@ -141,19 +148,34 @@ def train():
     model_path = 'models/universal_cnn_best.pth'
     if os.path.exists(model_path):
         print(f'Model already exists: {model_path}', flush=True)
+        print('Skipping training. Delete the model file to retrain.', flush=True)
         return
 
     os.makedirs('models', exist_ok=True)
 
+    # ── Configuration based on environment ──
+    is_render = os.environ.get('RENDER', '') == '1'
+    if is_render:
+        # Full training on Render (GPU or powerful CPU)
+        TARGET_TRAIN = 4000   # 4000/class * 62 = 248K samples
+        TARGET_VAL = 500
+        TARGET_TEST = 200
+        total_epochs = 50
+        patience = 15
+    else:
+        # Quick local training for testing
+        TARGET_TRAIN = 2000   # 2000/class * 62 = 124K samples
+        TARGET_VAL = 300
+        TARGET_TEST = 100
+        total_epochs = 30
+        patience = 10
+
     # ── Load EMNIST data ──
     data_dir = 'emnist_data'
-    TARGET_TRAIN = 3000
-    TARGET_VAL = 500
-
-    print('Loading EMNIST ByClass...', flush=True)
+    print(f'Loading EMNIST ByClass (train={TARGET_TRAIN}/class, val={TARGET_VAL}/class)...', flush=True)
     ds_train = EMNIST(root=data_dir, split='byclass', train=True, download=True)
     ds_test = EMNIST(root=data_dir, split='byclass', train=False, download=True)
-    print(f'  Train: {len(ds_train)}, Test: {len(ds_test)}', flush=True)
+    print(f'  Full Train: {len(ds_train)}, Full Test: {len(ds_test)}', flush=True)
 
     print(f'Creating balanced subset ({TARGET_TRAIN}/class)...', flush=True)
     class_buffers = defaultdict(list)
@@ -179,7 +201,6 @@ def train():
     del class_buffers
     gc.collect()
 
-    random.shuffle(list(zip(X_tr, y_tr)))
     X_train = (np.stack(X_tr).astype('float32') - EMNIST_MEAN) / EMNIST_STD
     y_train = np.array(y_tr, dtype=np.int64)
     del X_tr, y_tr
@@ -191,10 +212,12 @@ def train():
     gc.collect()
 
     X_te, y_te = [], []
+    test_class_count = defaultdict(int)
     for i in range(len(ds_test)):
         img, label = ds_test[i]
-        if label >= 62:
+        if label >= 62 or test_class_count[label] >= TARGET_TEST:
             continue
+        test_class_count[label] += 1
         arr = np.array(img).astype('float32') / 255.0
         arr = np.transpose(arr, (1, 0))[:, ::-1]
         X_te.append(arr)
@@ -204,6 +227,7 @@ def train():
     del X_te, y_te, ds_test
     gc.collect()
 
+    # Clean up EMNIST raw data
     import shutil
     shutil.rmtree(data_dir, ignore_errors=True)
 
@@ -232,6 +256,7 @@ def train():
 
     # ── RL Components ──
     class RLSampleMiner:
+        """Policy-gradient style hard sample mining."""
         def __init__(self, n, dev='cpu'):
             self.difficulty = torch.zeros(n, device=dev)
             self.weight_logits = torch.zeros(n, device=dev)
@@ -261,13 +286,11 @@ def train():
 
     best_acc = 0.0
     wait = 0
-    patience = 12
-    total_epochs = 40
     ckpt_path = 'models/v4_ckpt.pt'
     start_epoch = 0
 
     if os.path.exists(ckpt_path):
-        print('Resuming...', flush=True)
+        print('Resuming from checkpoint...', flush=True)
         c = torch.load(ckpt_path, map_location=device, weights_only=False)
         model.load_state_dict(c['model'])
         opt.load_state_dict(c['opt'])
@@ -285,25 +308,48 @@ def train():
         for _ in range(start_epoch * len(train_loader)):
             scheduler.step()
 
-    print(f'\nPhase 1 (E1-20): Mixup augmentation', flush=True)
-    print(f'Phase 2 (E21-35): RL hard sample mining', flush=True)
-    print(f'Phase 3 (E36-40): Fine-tuning', flush=True)
+    mixup_end = int(total_epochs * 0.5)   # 50% mixup
+    rl_end = int(total_epochs * 0.8)      # 30% RL
+    # rest is fine-tuning
+
+    print(f'\nPhase 1 (E1-{mixup_end}): Mixup augmentation + random shifts', flush=True)
+    print(f'Phase 2 (E{mixup_end+1}-{rl_end}): RL hard sample mining + confidence reg', flush=True)
+    print(f'Phase 3 (E{rl_end+1}-{total_epochs}): Fine-tuning', flush=True)
     print(f'{len(train_loader)} steps/epoch, batch_size=128', flush=True)
+    print(f'Training data: {len(train_loader.dataset)} samples', flush=True)
     print('=' * 70, flush=True)
 
     for epoch in range(start_epoch, total_epochs):
         t0 = time.time()
         model.train()
-        rl = cn = tn = 0
-        phase = 'mixup' if epoch < 20 else ('rl' if epoch < 35 else 'finetune')
+        rl_loss = cn = tn = 0
+        if epoch < mixup_end:
+            phase = 'mixup'
+        elif epoch < rl_end:
+            phase = 'rl'
+        else:
+            phase = 'finetune'
 
         for i, (imgs, lbls) in enumerate(train_loader):
             imgs, lbls = imgs.to(device), lbls.to(device)
 
-            # Augmentation
+            # Augmentation: random shift
             if random.random() < 0.5:
                 dy, dx = random.randint(-2, 2), random.randint(-2, 2)
                 imgs = torch.roll(imgs, shifts=(dy, dx), dims=(2, 3))
+
+            # Augmentation: small Gaussian noise
+            if random.random() < 0.2:
+                imgs = imgs + torch.randn_like(imgs) * 0.02
+
+            # Augmentation: random erasing
+            if random.random() < 0.15:
+                for img in imgs:
+                    x1 = random.randint(0, 24)
+                    y1 = random.randint(0, 24)
+                    x2 = min(x1 + random.randint(2, 6), 28)
+                    y2 = min(y1 + random.randint(2, 6), 28)
+                    img[:, x1:x2, y1:y2] = 0
 
             opt.zero_grad()
 
@@ -315,13 +361,11 @@ def train():
             elif phase == 'rl':
                 out = model(imgs)
                 per_sample_ce = crit(out, lbls)
-                # RL: update miner
                 batch_idx = torch.arange(i * 128, min((i+1) * 128, len(train_loader.dataset)),
                                           device=device)[:len(lbls)]
                 rl_miner.update(batch_idx, per_sample_ce.detach())
                 weights = rl_miner.get_weights(batch_idx)
                 weighted_ce = (per_sample_ce * weights).sum()
-                # Confidence regularization
                 probs = F.softmax(out, dim=1)
                 entropy = -(probs * F.log_softmax(out, dim=1)).sum(dim=1)
                 correct = (out.argmax(1) == lbls).float()
@@ -336,10 +380,14 @@ def train():
             opt.step()
             scheduler.step()
 
-            rl += loss.item()
+            rl_loss += loss.item()
             _, pred = torch.max(out, 1)
             tn += lbls.size(0)
             cn += (pred == lbls).sum().item()
+
+            if (i + 1) % 500 == 0:
+                print(f'  E{epoch+1} [{i+1}/{len(train_loader)}] '
+                      f'Loss: {rl_loss/(i+1):.4f} Acc: {100*cn/tn:.1f}%', flush=True)
 
         train_acc = 100 * cn / tn
         elapsed = time.time() - t0
@@ -410,6 +458,7 @@ def train():
     for gn, s, e in [('Digits', 0, 10), ('Uppercase', 10, 36), ('Lowercase', 36, 62)]:
         print(f'  {gn}: {100*sum(cc[s:e])/max(sum(ct[s:e]),1):.1f}%', flush=True)
 
+    # Clean up checkpoint
     if os.path.exists(ckpt_path):
         os.remove(ckpt_path)
     print('Done!', flush=True)

@@ -1,7 +1,7 @@
 /* ============================================================
    CharSense AI — Frontend Logic
-   V1: 10-class digit CNN  |  V2: 62-class universal CNN
-   Features: model toggle, number builder, auto-predict on mouseup
+   V1: 10-class digit CNN  |  V2: 62-class universal CNN (V4 ResNet+SE+CBAM+RL)
+   Features: model toggle, number builder, auto-predict on mouseup, 62-char grid
    ============================================================ */
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -20,6 +20,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const canvasBadge   = document.getElementById('canvas-badge');
     const charGuide     = document.getElementById('char-guide');
 
+    const step1Desc     = document.getElementById('step1-desc');
     const step2Title    = document.getElementById('step2-title');
     const step2Desc     = document.getElementById('step2-desc');
     const step3Title    = document.getElementById('step3-title');
@@ -43,6 +44,37 @@ document.addEventListener('DOMContentLoaded', () => {
     const nbAddBtn      = document.getElementById('nb-add-btn');
     const nbClearBtn    = document.getElementById('nb-clear-btn');
     const nbCopyBtn     = document.getElementById('nb-copy-btn');
+
+    // Character grid
+    const digitsGrid    = document.getElementById('digits-grid');
+    const upperGrid     = document.getElementById('upper-grid');
+    const lowerGrid     = document.getElementById('lower-grid');
+
+    // ── Build 62-character grid ──────────────────────────────────────────
+    function buildCharGrid() {
+        // Digits 0-9
+        for (let i = 0; i <= 9; i++) {
+            const cell = document.createElement('span');
+            cell.className = 'char-cell';
+            cell.textContent = i;
+            digitsGrid.appendChild(cell);
+        }
+        // Uppercase A-Z
+        for (let c = 65; c <= 90; c++) {
+            const cell = document.createElement('span');
+            cell.className = 'char-cell';
+            cell.textContent = String.fromCharCode(c);
+            upperGrid.appendChild(cell);
+        }
+        // Lowercase a-z
+        for (let c = 97; c <= 122; c++) {
+            const cell = document.createElement('span');
+            cell.className = 'char-cell';
+            cell.textContent = String.fromCharCode(c);
+            lowerGrid.appendChild(cell);
+        }
+    }
+    buildCharGrid();
 
     // ── App State ─────────────────────────────────────────────────────────
     let currentMode     = 'v1';         // 'v1' | 'v2'
@@ -129,19 +161,21 @@ document.addEventListener('DOMContentLoaded', () => {
             modelBadge.textContent    = 'CNN · v1 · 10 classes';
             canvasBadge.textContent   = '28 × 28 MNIST Scale';
             charGuide.style.display   = 'none';
+            step1Desc.textContent     = '3 blocks of Conv2D + BatchNorm + ReLU detect edges, loops, and curves.';
             step2Title.textContent    = 'MaxPool + Dropout';
             step2Desc.textContent     = 'Spatial downsampling and dropout prevent overfitting.';
             step3Title.textContent    = 'Softmax · 10 Classes';
             step3Desc.textContent     = 'Dense head maps features to digit probabilities.';
         } else {
             versionBadge.textContent  = 'v2 Universal';
-            modelBadge.textContent    = 'CNN · v2 · 62 classes';
+            modelBadge.textContent    = 'ResNet+SE+CBAM · v4 · 62 classes';
             canvasBadge.textContent   = 'EMNIST 28 × 28 Scale';
             charGuide.style.display   = 'block';
+            step1Desc.textContent     = '3 stages × 4 ResBlocks with SE & CBAM attention: edge → stroke → structure features.';
             step2Title.textContent    = 'MaxPool × 3 + Dropout2D';
-            step2Desc.textContent     = 'Deeper feature pyramid handles curved letters vs. sharp digits.';
+            step2Desc.textContent     = 'Progressive downsampling (14→7→3) + dropout(0.02→0.10) prevents overfitting on 697K+ samples.';
             step3Title.textContent    = 'Softmax · 62 Classes';
-            step3Desc.textContent     = 'Dense(512) → Dense(62): digits, uppercase A–Z, lowercase a–z.';
+            step3Desc.textContent     = 'Dense(256→128) → Dense(128→62): digits 0–9, uppercase A–Z, lowercase a–z. RL-trained.';
         }
 
         // Update CSS accent vars via body class (CSS handles the rest)

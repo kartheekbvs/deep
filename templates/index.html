@@ -113,13 +113,25 @@
                     </button>
                 </div>
 
-                <!-- Quick char-set guide (v2 only) -->
+                <!-- Supported characters panel -->
                 <div class="char-guide" id="char-guide" style="display:none">
                     <p class="guide-title">Supported characters (62 total)</p>
-                    <div class="guide-chips">
-                        <span class="guide-group">Digits: 0 1 2 3 4 5 6 7 8 9</span>
-                        <span class="guide-group">Upper: A B C … Z</span>
-                        <span class="guide-group">Lower: a b c … z</span>
+                    <div class="char-grid" id="char-grid">
+                        <!-- Digits -->
+                        <div class="char-group">
+                            <span class="char-group-label">Digits</span>
+                            <div class="char-chips" id="digits-grid"></div>
+                        </div>
+                        <!-- Uppercase -->
+                        <div class="char-group">
+                            <span class="char-group-label">Uppercase</span>
+                            <div class="char-chips" id="upper-grid"></div>
+                        </div>
+                        <!-- Lowercase -->
+                        <div class="char-group">
+                            <span class="char-group-label">Lowercase</span>
+                            <div class="char-chips" id="lower-grid"></div>
+                        </div>
                     </div>
                 </div>
             </section>
@@ -128,7 +140,7 @@
             <section class="panel pipeline-panel">
                 <div class="panel-header">
                     <h2>ML Pipeline</h2>
-                    <span class="badge" id="model-label-badge">CNN · v1</span>
+                    <span class="badge" id="model-label-badge">CNN · v1 · 10 classes</span>
                 </div>
 
                 <!-- Pipeline Steps -->
@@ -144,7 +156,7 @@
                         </div>
                         <div class="step-details">
                             <h3>Conv Feature Extraction</h3>
-                            <p>3 blocks of Conv2D + BatchNorm + ReLU detect edges, loops, and curves.</p>
+                            <p id="step1-desc">3 blocks of Conv2D + BatchNorm + ReLU detect edges, loops, and curves.</p>
                             <div class="progress-bar-container"><div class="progress-bar"></div></div>
                         </div>
                     </div>
@@ -204,7 +216,7 @@
         </main>
 
         <footer class="app-footer">
-            <p>CharSense AI &mdash; v1 MNIST (10 classes) &amp; v2 EMNIST ByClass (62 classes). Built for precision.</p>
+            <p>CharSense AI &mdash; v1 MNIST (10 classes) &amp; v2 EMNIST ByClass (62 classes, ResNet+SE+CBAM+RL). Built for precision.</p>
         </footer>
     </div>
 

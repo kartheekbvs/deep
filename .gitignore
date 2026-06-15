@@ -38,5 +38,10 @@ models/universal_cnn_v3.pth
 run_training.sh
 emnist_data/
 models/v4_ckpt.pt
+models/train_v4_data.pt
+models/val_v4_data.pt
+models/test_v4_data.pt
 train_log*.txt
 train_powerful.py
+train_output.log
+train_v4.log

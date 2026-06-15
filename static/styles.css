@@ -421,6 +421,44 @@ body.mode-v2 h1 {
     font-family: 'Courier New', monospace;
 }
 
+/* ── Character Grid ─────────────────────────────────────────────────────── */
+.char-grid {
+    display: flex; flex-direction: column; gap: 10px;
+}
+
+.char-group {
+    display: flex; flex-direction: column; gap: 4px;
+}
+
+.char-group-label {
+    font-size: 10px; font-weight: 700;
+    color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.1em;
+}
+
+.char-chips {
+    display: flex; flex-wrap: wrap; gap: 4px;
+}
+
+.char-cell {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 28px; height: 28px;
+    background: var(--surface-3);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    font-size: 13px; font-weight: 600;
+    font-family: 'Courier New', monospace;
+    color: var(--text-muted);
+    transition: all 0.2s;
+}
+
+.char-cell:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--surface-2);
+    box-shadow: 0 0 6px var(--accent-glow);
+}
+
 /* ── Pipeline ───────────────────────────────────────────────────────────── */
 .pipeline-flow {
     display: flex; flex-direction: column; gap: 12px;
